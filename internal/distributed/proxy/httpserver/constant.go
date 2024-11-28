@@ -74,6 +74,7 @@ const (
 	VectorCollectionsCreatePath   = "/vector/collections/create"
 	VectorCollectionsDescribePath = "/vector/collections/describe"
 	VectorCollectionsDropPath     = "/vector/collections/drop"
+	VectorCollectionTruncatePath  = "/vector/collections/truncate"
 	VectorInsertPath              = "/vector/insert"
 	VectorUpsertPath              = "/vector/upsert"
 	VectorSearchPath              = "/vector/search"

@@ -32,6 +32,11 @@ type DropCollectionReq struct {
 	CollectionName string `json:"collectionName" validate:"required"`
 }
 
+type TruncateCollectionReq struct {
+	DbName         string `json:"dbName"`
+	CollectionName string `json:"collectionName" validate:"required"`
+}
+
 type QueryReq struct {
 	DbName         string   `json:"dbName"`
 	CollectionName string   `json:"collectionName" validate:"required"`
