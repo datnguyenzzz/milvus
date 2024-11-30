@@ -952,6 +952,87 @@ func (node *Proxy) ReleaseCollection(ctx context.Context, request *milvuspb.Rele
 	return rct.result, nil
 }
 
+// TruncateCollection cleans all data in a collection.
+func (node *Proxy) TruncateCollection(ctx context.Context, req *milvuspb.TruncateCollectionRequest) (*commonpb.Status, error) {
+	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
+		return merr.Status(err), err
+	}
+
+	method := "TruncateCollection"
+	spanName := fmt.Sprintf("Proxy-%s", method)
+
+	ctx, span := otel.Tracer(typeutil.ProxyRole).Start(ctx, spanName)
+	defer span.End()
+
+	log := log.Ctx(ctx).With(
+		zap.String("role", typeutil.ProxyRole),
+		zap.String("db", req.DbName),
+		zap.String("collection", req.CollectionName))
+
+	tr := timerecord.NewTimeRecorder(method)
+	metrics.ProxyFunctionCall.WithLabelValues(
+		strconv.FormatInt(paramtable.GetNodeID(), 10),
+		method,
+		metrics.TotalLabel,
+		req.GetDbName(),
+		req.GetCollectionName(),
+	).Inc()
+
+	log.Debug(rpcReceived(method))
+
+	tct := &truncateCollectionTask{
+		ctx:                       ctx,
+		TruncateCollectionRequest: req,
+		rootCoordClient:           node.rootCoord,
+		replicateMsgStream:        node.replicateMsgStream,
+		chMgr:                     node.chMgr,
+		chTicker:                  node.chTicker,
+	}
+
+	if err := node.sched.ddQueue.Enqueue(tct); err != nil {
+		log.Warn(fmt.Sprintf("method %s failed to enqueue", method), zap.Error(err))
+
+		metrics.ProxyFunctionCall.WithLabelValues(
+			strconv.FormatInt(paramtable.GetNodeID(), 10),
+			method,
+			metrics.AbandonLabel,
+			req.GetDbName(),
+			req.GetCollectionName(),
+		).Inc()
+
+		return merr.Status(err), err
+	}
+
+	log.Debug(
+		rpcEnqueued(method),
+		zap.Uint64("BeginTS", tct.BeginTs()),
+		zap.Uint64("EndTS", tct.EndTs()),
+	)
+
+	if err := tct.WaitToFinish(); err != nil {
+		log.Warn(rpcFailedToWaitToFinish(method), zap.Error(err), zap.Uint64("BeginTS", tct.BeginTs()), zap.Uint64("EndTS", tct.EndTs()))
+
+		metrics.ProxyFunctionCall.WithLabelValues(
+			strconv.FormatInt(paramtable.GetNodeID(), 10), method,
+			metrics.FailLabel, req.GetDbName(), req.GetCollectionName(),
+		).Inc()
+		return merr.Status(err), nil
+	}
+
+	log.Debug(
+		rpcDone(method),
+		zap.Uint64("BeginTS", tct.BeginTs()),
+		zap.Uint64("EndTS", tct.EndTs()))
+
+	metrics.ProxyFunctionCall.WithLabelValues(
+		strconv.FormatInt(paramtable.GetNodeID(), 10), method,
+		metrics.SuccessLabel, req.GetDbName(), req.GetCollectionName(),
+	).Inc()
+	metrics.ProxyReqLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), method).Observe(float64(tr.ElapseSpan().Milliseconds()))
+
+	return tct.result, nil
+}
+
 // DescribeCollection get the meta information of specific collection, such as schema, created timestamp and etc.
 func (node *Proxy) DescribeCollection(ctx context.Context, request *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {

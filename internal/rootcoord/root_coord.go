@@ -1181,6 +1181,11 @@ func (c *Core) HasCollection(ctx context.Context, in *milvuspb.HasCollectionRequ
 	return t.Rsp, nil
 }
 
+func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateCollectionRequest) (*commonpb.Status, error) {
+	// TODO dat.ngthanh implement me !
+	return nil, nil
+}
+
 // getCollectionIDStr get collectionID string to avoid the alias name
 func (c *Core) getCollectionIDStr(ctx context.Context, db, collectionName string, collectionID int64) string {
 	// When neither the collection name nor the collectionID exists, no error is returned at this point.
