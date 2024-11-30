@@ -53,6 +53,7 @@ const (
 	SearchAction         = "search"
 	AdvancedSearchAction = "advanced_search"
 	HybridSearchAction   = "hybrid_search"
+	TruncateAction       = "truncate"
 
 	UpdatePasswordAction            = "update_password"
 	GrantRoleAction                 = "grant_role"
