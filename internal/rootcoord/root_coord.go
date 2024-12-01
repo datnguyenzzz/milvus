@@ -1182,8 +1182,47 @@ func (c *Core) HasCollection(ctx context.Context, in *milvuspb.HasCollectionRequ
 }
 
 func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateCollectionRequest) (*commonpb.Status, error) {
-	// TODO dat.ngthanh implement me !
-	return nil, nil
+	if err := merr.CheckHealthy(c.GetStateCode()); err != nil {
+		return merr.Status(err), err
+	}
+
+	method := "TruncateCollection"
+
+	metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.TotalLabel).Inc()
+	tr := timerecord.NewTimeRecorder(method)
+
+	log.Ctx(ctx).With(
+		zap.String("role", typeutil.RootCoordRole),
+		zap.String("dbName", in.GetDbName()),
+		zap.String("name", in.GetCollectionName()),
+	)
+
+	log.Debug("received request to truncate collection")
+
+	tct := &truncateCollectionTask{
+		baseTask: newBaseTask(ctx, c),
+		Req:      in,
+	}
+
+	if err := c.scheduler.AddTask(tct); err != nil {
+		log.Error(fmt.Sprintf("failed to enqueue the task of %s method", method))
+		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+		return merr.Status(err), err
+	}
+
+	if err := tct.WaitToFinish(); err != nil {
+		log.Error(fmt.Sprintf("failed to execute the task of %s method", method))
+		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+		return merr.Status(err), err
+	}
+
+	metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.SuccessLabel).Inc()
+	metrics.RootCoordDDLReqLatency.WithLabelValues(method).Observe(float64(tr.ElapseSpan().Milliseconds()))
+	metrics.RootCoordDDLReqLatencyInQueue.WithLabelValues(method).Observe(float64(tct.queueDur.Milliseconds()))
+
+	log.Debug("success in truncating collection")
+
+	return merr.Success(), nil
 }
 
 // getCollectionIDStr get collectionID string to avoid the alias name
