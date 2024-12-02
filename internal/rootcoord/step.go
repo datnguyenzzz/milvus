@@ -598,3 +598,8 @@ func (s *simpleStep) Desc() string {
 func (s *simpleStep) Weight() stepPriority {
 	return s.weight
 }
+
+// TODO dat.ngthanh implement me sensei !!
+type buildIndexStep struct{}
+type loadCollectionStep struct{}
+type exchangeCollectionStep struct{}
