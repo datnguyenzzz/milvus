@@ -23,6 +23,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/merr"
@@ -85,62 +86,64 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 	}
 
 	undoTask := newBaseUndoTask(t.core.stepExecutor)
-
-	// 1. Clean cache of all aliases
+	// 1. Clean meta cache of all aliases of the original collection
+	aliases := t.core.meta.ListAliasesByID(ctx, collMeta.CollectionID)
+	ts := t.GetTs()
 	undoTask.AddStep(
-		&expireCacheStep{},
+		&expireCacheStep{
+			baseStep:        baseStep{core: t.core},
+			dbName:          dbName,
+			collectionNames: append(aliases, collMeta.Name),
+			collectionID:    collMeta.CollectionID,
+			ts:              ts,
+			opts:            []proxyutil.ExpireCacheOpt{proxyutil.SetMsgType(commonpb.MsgType_TruncateCollection)},
+		},
 		&nullStep{},
 	)
-
 	// 2. Create new temporary collection meta
 	tempCollName := util.GenerateTempCollectionName(collName)
 	undoTask.AddStep(
 		&addCollectionMetaStep{},
 		&deleteCollectionMetaStep{},
 	)
-
 	// release the temporary collection
 	undoTask.AddStep(
 		&nullStep{},
 		&releaseCollectionStep{},
 	)
-
 	// 3. Build indexes for the temporary collection
 	undoTask.AddStep(
 		&buildIndexStep{},
 		&dropIndexStep{},
 	)
-
 	// 4. Load temporary collection
 	undoTask.AddStep(
 		&loadCollectionStep{},
 		&nullStep{},
 	)
-
 	// 5. Exchange original collection with the temporary one
 	undoTask.AddStep(
 		&exchangeCollectionStep{},
 		&nullStep{},
 	)
-
 	// 6. Seeking confirmation for async GC to remove the actual data of original collection
 	undoTask.AddStep(
 		newConfirmGCStep(t.core, collMeta.CollectionID, allPartition),
 		&nullStep{},
 	)
-
 	// 7. release original collection
 	undoTask.AddStep(
 		&releaseCollectionStep{},
 		&nullStep{},
 	)
-
 	// 8. remove original collection meta
 	undoTask.AddStep(
 		&deleteCollectionMetaStep{},
 		&nullStep{},
 	)
+	// 9, After this point, the async GC will eventually delete the actual original collection data
 
+	return undoTask.Execute(ctx)
 }
 
 func (t *truncateCollectionTask) GetLockerKey() LockerKey {
