@@ -20,13 +20,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cockroachdb/errors"
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util"
-	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 	"go.uber.org/zap"
 )
@@ -64,7 +62,6 @@ func (t *truncateCollectionTask) Prepare(ctx context.Context) error {
 }
 
 func (t *truncateCollectionTask) Execute(ctx context.Context) error {
-
 	dbName := t.Req.GetDbName()
 	collName := t.Req.GetCollectionName()
 
@@ -75,13 +72,15 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 
 	// get latest collection from meta table by requesting with maxTS
 	collMeta, err := t.core.meta.GetCollectionByName(ctx, dbName, collName, typeutil.MaxTimestamp)
-	if errors.Is(err, merr.ErrCollectionNotFound) {
-		log.Error("attempt to truncate non-existing collection")
-		return nil
-	}
-
 	if err != nil {
 		log.Error(fmt.Sprintf("failed to get collection by name, err: %+v", err))
+		return err
+	}
+
+	tempCollName := util.GenerateTempCollectionName(collName)
+	tempCollMeta, err := t.core.meta.GetCollectionByName(ctx, dbName, tempCollName, typeutil.MaxTimestamp)
+	if err != nil {
+		log.Error(fmt.Sprintf("failed to get temp collection, err: %+v", err))
 		return err
 	}
 
@@ -100,23 +99,17 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 		},
 		&nullStep{},
 	)
-	// 2. Create new temporary collection meta
-	tempCollName := util.GenerateTempCollectionName(collName)
-	undoTask.AddStep(
-		&addCollectionMetaStep{},
-		&deleteCollectionMetaStep{},
-	)
-	// release the temporary collection
-	undoTask.AddStep(
-		&nullStep{},
-		&releaseCollectionStep{},
-	)
-	// 3. Build indexes for the temporary collection
+	// 2. build index for the temp collection
 	undoTask.AddStep(
 		&buildIndexStep{},
 		&dropIndexStep{},
 	)
-	// 4. Load temporary collection
+	// 3. Release the original collection
+	undoTask.AddStep(
+		&releaseCollectionStep{},
+		&nullStep{},
+	)
+	// 4. Load the temporary collection
 	undoTask.AddStep(
 		&loadCollectionStep{},
 		&nullStep{},
@@ -126,22 +119,8 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 		&exchangeCollectionStep{},
 		&nullStep{},
 	)
-	// 6. Seeking confirmation for async GC to remove the actual data of original collection
-	undoTask.AddStep(
-		newConfirmGCStep(t.core, collMeta.CollectionID, allPartition),
-		&nullStep{},
-	)
-	// 7. release original collection
-	undoTask.AddStep(
-		&releaseCollectionStep{},
-		&nullStep{},
-	)
-	// 8. remove original collection meta
-	undoTask.AddStep(
-		&deleteCollectionMetaStep{},
-		&nullStep{},
-	)
-	// 9, After this point, the async GC will eventually delete the actual original collection data
+	// At this point , the original collection has been marked as DROP,
+	// then eventually it will be removed by the async. background GC
 
 	return undoTask.Execute(ctx)
 }

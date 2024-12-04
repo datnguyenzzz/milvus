@@ -34,6 +34,7 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -1199,6 +1200,36 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 
 	log.Debug("received request to truncate collection")
 
+	/**
+	* Submit a task for creating a temporary collection,
+	* with the same "Schema" with the original collection
+	 */
+	createTempCollReq, err := c.prepareCreateTempCollectionRequest(ctx, in)
+	if err != nil {
+		log.Warn("failed to prepare a request for creating a temp collection")
+		return merr.Status(err), err
+	}
+
+	t := &createCollectionTask{
+		baseTask: newBaseTask(ctx, c),
+		Req:      createTempCollReq,
+	}
+
+	if err := c.scheduler.AddTask(t); err != nil {
+		log.Warn("failed to enqueue request to create a temp collection, before truncating an original collection")
+		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+		return merr.Status(err), err
+	}
+
+	// There is no temp collection has been created, if the creation job fail.
+	// Thus don't need to worry about the recovery step here
+	if err := t.WaitToFinish(); err != nil {
+		log.Warn("failed to execute request to create a temp collection, before truncating an original collection")
+		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+		return merr.Status(err), err
+	}
+
+	// Submit a task for truncating original collection
 	tct := &truncateCollectionTask{
 		baseTask: newBaseTask(ctx, c),
 		Req:      in,
@@ -1213,6 +1244,25 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 	if err := tct.WaitToFinish(); err != nil {
 		log.Error(fmt.Sprintf("failed to execute the task of %s method", method))
 		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+
+		/** If the truncate collection task failed to execute
+		* To maintain the atomicity, need to drop the temp collection that has been created
+		* at the beginning of the function
+		 */
+		tempColl, uerr := c.meta.GetCollectionByName(ctx, createTempCollReq.GetDbName(), createTempCollReq.GetCollectionName(), typeutil.MaxTimestamp)
+		if uerr != nil {
+			log.Warn("failed to get the temp collection when attempt to drop it")
+			return merr.Status(uerr), uerr
+		}
+		ts, uerr := c.tsoAllocator.GenerateTSO(1)
+		if uerr != nil {
+			log.Warn("failed to generate TS when attempt to drop the temp collection")
+			return merr.Status(uerr), uerr
+		}
+
+		// run the func synchronously, to wait the temp collection to be removed
+		c.garbageCollector.ReDropCollection(tempColl, ts)
+
 		return merr.Status(err), err
 	}
 
@@ -1223,6 +1273,79 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 	log.Debug("success in truncating collection")
 
 	return merr.Success(), nil
+}
+
+func (c *Core) prepareCreateTempCollectionRequest(ctx context.Context, in *milvuspb.TruncateCollectionRequest) (*milvuspb.CreateCollectionRequest, error) {
+	dbName := in.GetDbName()
+
+	// get latest collection verion from meta table by requesting with maxTS
+	orgColl, err := c.meta.GetCollectionByName(ctx, dbName, in.GetCollectionName(), typeutil.MaxTimestamp)
+	if err != nil {
+		return nil, err
+	}
+
+	// temp collection name
+	tempCollName := util.GenerateTempCollectionName(orgColl.Name)
+
+	// temp collection schema
+	tempCollSchemaFields := make([]*schemapb.FieldSchema, len(orgColl.Fields))
+	for idx, f := range orgColl.Fields {
+		tempCollSchemaFields[idx] = &schemapb.FieldSchema{
+			FieldID:          f.FieldID,
+			Name:             f.Name,
+			IsPrimaryKey:     f.IsPrimaryKey,
+			Description:      f.Description,
+			DataType:         f.DataType,
+			TypeParams:       f.TypeParams,
+			IndexParams:      f.IndexParams,
+			AutoID:           f.AutoID,
+			State:            f.State,
+			ElementType:      f.ElementType,
+			DefaultValue:     f.DefaultValue,
+			IsDynamic:        f.IsDynamic,
+			IsPartitionKey:   f.IsPartitionKey,
+			IsClusteringKey:  f.IsClusteringKey,
+			Nullable:         f.Nullable,
+			IsFunctionOutput: f.IsFunctionOutput,
+		}
+	}
+
+	tempCollSchemaFunctions := make([]*schemapb.FunctionSchema, len(orgColl.Functions))
+	for idx, f := range orgColl.Functions {
+		tempCollSchemaFunctions[idx] = &schemapb.FunctionSchema{
+			Name:             f.Name,
+			Id:               f.ID,
+			Description:      f.Description,
+			Type:             f.Type,
+			InputFieldNames:  f.InputFieldNames,
+			InputFieldIds:    f.InputFieldIDs,
+			OutputFieldNames: f.OutputFieldNames,
+			OutputFieldIds:   f.OutputFieldIDs,
+			Params:           f.Params,
+		}
+	}
+
+	// error won't be occurred here
+	tempCollSchema, _ := proto.Marshal(&schemapb.CollectionSchema{
+		Name:               tempCollName,
+		Description:        orgColl.Description,
+		AutoID:             orgColl.AutoID,
+		Fields:             tempCollSchemaFields,
+		EnableDynamicField: orgColl.EnableDynamicField,
+		Properties:         orgColl.Properties,
+		Functions:          tempCollSchemaFunctions,
+		DbName:             dbName,
+	})
+
+	return &milvuspb.CreateCollectionRequest{
+		DbName:           dbName,
+		CollectionName:   tempCollName,
+		Schema:           tempCollSchema,
+		ShardsNum:        orgColl.ShardsNum,
+		ConsistencyLevel: orgColl.ConsistencyLevel,
+		Properties:       orgColl.Properties,
+		NumPartitions:    int64(orgColl.GetPartitionNum(false)),
+	}, nil
 }
 
 // getCollectionIDStr get collectionID string to avoid the alias name
