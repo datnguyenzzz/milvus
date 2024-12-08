@@ -1201,7 +1201,7 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 	log.Debug("received request to truncate collection")
 
 	/**
-	* Submit a task for creating a temporary collection,
+	* 1. Submit a task for creating a temporary collection,
 	* with the same "Schema" with the original collection
 	 */
 	createTempCollReq, err := c.prepareCreateTempCollectionRequest(ctx, in)
@@ -1210,12 +1210,12 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 		return merr.Status(err), err
 	}
 
-	t := &createCollectionTask{
+	cct := &createCollectionTask{
 		baseTask: newBaseTask(ctx, c),
 		Req:      createTempCollReq,
 	}
 
-	if err := c.scheduler.AddTask(t); err != nil {
+	if err := c.scheduler.AddTask(cct); err != nil {
 		log.Warn("failed to enqueue request to create a temp collection, before truncating an original collection")
 		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
 		return merr.Status(err), err
@@ -1223,13 +1223,13 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 
 	// There is no temp collection has been created, if the creation job fail.
 	// Thus don't need to worry about the recovery step here
-	if err := t.WaitToFinish(); err != nil {
+	if err := cct.WaitToFinish(); err != nil {
 		log.Warn("failed to execute request to create a temp collection, before truncating an original collection")
 		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
 		return merr.Status(err), err
 	}
 
-	// Submit a task for truncating original collection
+	// 2. Submit a task for truncating original collection
 	tct := &truncateCollectionTask{
 		baseTask: newBaseTask(ctx, c),
 		Req:      in,
@@ -1245,7 +1245,8 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 		log.Error(fmt.Sprintf("failed to execute the task of %s method", method))
 		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
 
-		/** If the truncate collection task failed to execute
+		/**
+		* 3. If the truncate collection task failed to execute
 		* To maintain the atomicity, need to drop the temp collection that has been created
 		* at the beginning of the function
 		 */
@@ -1260,7 +1261,7 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 			return merr.Status(uerr), uerr
 		}
 
-		// run the func synchronously, to wait the temp collection to be removed
+		// run the func synchronously, to wait the temp collection to be removed before returning
 		c.garbageCollector.ReDropCollection(tempColl, ts)
 
 		return merr.Status(err), err

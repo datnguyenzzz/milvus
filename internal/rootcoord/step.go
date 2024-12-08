@@ -599,7 +599,26 @@ func (s *simpleStep) Weight() stepPriority {
 	return s.weight
 }
 
+type buildIndexStep struct {
+	baseStep
+	collectionID UniqueID
+	partIDs      []UniqueID
+}
+
+func (s *buildIndexStep) Execute(ctx context.Context) ([]nestedStep, error) {
+	return nil, s.core.broker.CreateCollectionIndex(ctx, s.collectionID, s.partIDs)
+}
+
+func (s *buildIndexStep) Desc() string {
+	return fmt.Sprintf("build index for collection: %d", s.collectionID)
+}
+
+func (s *buildIndexStep) Weight() stepPriority {
+	return stepPriorityLow
+}
+
 // TODO dat.ngthanh implement me sensei !!
-type buildIndexStep struct{}
 type loadCollectionStep struct{}
+
+// TODO dat.ngthanh implement me sensei !!
 type exchangeCollectionStep struct{}

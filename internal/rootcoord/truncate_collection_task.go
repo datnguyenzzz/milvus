@@ -101,8 +101,14 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 	)
 	// 2. build index for the temp collection
 	undoTask.AddStep(
-		&buildIndexStep{},
-		&dropIndexStep{},
+		&buildIndexStep{
+			baseStep:     baseStep{core: t.core},
+			collectionID: tempCollMeta.CollectionID,
+		},
+		&dropIndexStep{
+			baseStep: baseStep{core: t.core},
+			collID:   tempCollMeta.CollectionID,
+		},
 	)
 	// 3. Release the original collection
 	undoTask.AddStep(
