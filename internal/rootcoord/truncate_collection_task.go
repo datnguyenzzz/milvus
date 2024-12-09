@@ -99,28 +99,24 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 		},
 		&nullStep{},
 	)
-	// 2. build index for the temp collection
+	// 2. build index for the temp collection, which are cloned from the original ones
 	undoTask.AddStep(
-		&buildIndexStep{
-			baseStep:     baseStep{core: t.core},
-			collectionID: tempCollMeta.CollectionID,
+		&buildIndexForTempCollectionStep{
+			baseStep:         baseStep{core: t.core},
+			orgCollectionID:  collMeta.CollectionID,
+			tempCollectionID: tempCollMeta.CollectionID,
 		},
 		&dropIndexStep{
 			baseStep: baseStep{core: t.core},
 			collID:   tempCollMeta.CollectionID,
 		},
 	)
-	// 3. Release the original collection
-	undoTask.AddStep(
-		&releaseCollectionStep{},
-		&nullStep{},
-	)
-	// 4. Load the temporary collection
+	// 3. Load the temporary collection
 	undoTask.AddStep(
 		&loadCollectionStep{},
 		&nullStep{},
 	)
-	// 5. Exchange original collection with the temporary one
+	// 4. Exchange original collection with the temporary one
 	undoTask.AddStep(
 		&exchangeCollectionStep{},
 		&nullStep{},

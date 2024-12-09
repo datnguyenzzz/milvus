@@ -599,21 +599,22 @@ func (s *simpleStep) Weight() stepPriority {
 	return s.weight
 }
 
-type buildIndexStep struct {
+type buildIndexForTempCollectionStep struct {
 	baseStep
-	collectionID UniqueID
-	partIDs      []UniqueID
+	orgCollectionID  UniqueID
+	tempCollectionID UniqueID
+	partIDs          []UniqueID
 }
 
-func (s *buildIndexStep) Execute(ctx context.Context) ([]nestedStep, error) {
-	return nil, s.core.broker.CreateCollectionIndex(ctx, s.collectionID, s.partIDs)
+func (s *buildIndexForTempCollectionStep) Execute(ctx context.Context) ([]nestedStep, error) {
+	return nil, s.core.broker.CloneCollectionIndex(ctx, s.orgCollectionID, s.tempCollectionID, s.partIDs)
 }
 
-func (s *buildIndexStep) Desc() string {
-	return fmt.Sprintf("build index for collection: %d", s.collectionID)
+func (s *buildIndexForTempCollectionStep) Desc() string {
+	return fmt.Sprintf("build index for temp collection: %d, from original collection: %d", s.tempCollectionID, s.orgCollectionID)
 }
 
-func (s *buildIndexStep) Weight() stepPriority {
+func (s *buildIndexForTempCollectionStep) Weight() stepPriority {
 	return stepPriorityLow
 }
 
