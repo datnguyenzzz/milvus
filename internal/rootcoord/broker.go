@@ -58,7 +58,6 @@ type Broker interface {
 	GcConfirm(ctx context.Context, collectionID, partitionID UniqueID) bool
 
 	DropCollectionIndex(ctx context.Context, collID UniqueID, partIDs []UniqueID) error
-	CloneCollectionIndex(ctx context.Context, sourceCollID, targetCollID UniqueID, partIDs []UniqueID) error
 	// notify observer to clean their meta cache
 	BroadcastAlteredCollection(ctx context.Context, req *milvuspb.AlterCollectionRequest) error
 }
@@ -206,11 +205,6 @@ func (b *ServerBroker) DropCollectionIndex(ctx context.Context, collID UniqueID,
 
 	log.Ctx(ctx).Info("done to drop collection index", zap.Int64("collection", collID), zap.Int64s("partitions", partIDs))
 
-	return nil
-}
-
-func (b *ServerBroker) CloneCollectionIndex(ctx context.Context, sourceCollID, targetCollID UniqueID, partIDs []UniqueID) error {
-	// TODO implement senseiii !!
 	return nil
 }
 

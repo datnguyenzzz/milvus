@@ -27,9 +27,11 @@ import (
 	"github.com/milvus-io/milvus/internal/distributed/streaming"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
+	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/pkg/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 type stepPriority int
@@ -607,7 +609,38 @@ type buildIndexForTempCollectionStep struct {
 }
 
 func (s *buildIndexForTempCollectionStep) Execute(ctx context.Context) ([]nestedStep, error) {
-	return nil, s.core.broker.CloneCollectionIndex(ctx, s.orgCollectionID, s.tempCollectionID, s.partIDs)
+	// List indexes of the original collection
+	liResp, err := s.core.dataCoord.ListIndexes(
+		ctx, &indexpb.ListIndexesRequest{CollectionID: s.orgCollectionID},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	orgIndexInfos := liResp.GetIndexInfos()
+	// Copy original indexes for temporary collection
+	for _, index := range orgIndexInfos {
+		ts, err := s.core.tsoAllocator.GenerateTSO(1)
+		if err != nil {
+			return nil, err
+		}
+		status, err := s.core.dataCoord.CreateIndex(ctx, &indexpb.CreateIndexRequest{
+			CollectionID:    s.tempCollectionID,
+			FieldID:         index.GetFieldID(),
+			IndexName:       index.GetIndexName(),
+			TypeParams:      index.GetTypeParams(),
+			IndexParams:     index.GetIndexParams(),
+			Timestamp:       ts,
+			IsAutoIndex:     index.GetIsAutoIndex(),
+			UserIndexParams: index.GetUserIndexParams(),
+		})
+
+		if err = merr.CheckRPCCall(status, err); err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, nil
 }
 
 func (s *buildIndexForTempCollectionStep) Desc() string {
