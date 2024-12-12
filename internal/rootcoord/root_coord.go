@@ -1231,8 +1231,9 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 
 	// 2. Submit a task for truncating original collection
 	tct := &truncateCollectionTask{
-		baseTask: newBaseTask(ctx, c),
-		Req:      in,
+		baseTask:       newBaseTask(ctx, c),
+		Req:            in,
+		TempCollSchema: createTempCollReq.GetSchema(),
 	}
 
 	if err := c.scheduler.AddTask(tct); err != nil {

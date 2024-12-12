@@ -18,10 +18,12 @@ package rootcoord
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util"
@@ -31,7 +33,8 @@ import (
 
 type truncateCollectionTask struct {
 	baseTask
-	Req *milvuspb.TruncateCollectionRequest
+	Req            *milvuspb.TruncateCollectionRequest
+	TempCollSchema []byte
 }
 
 // To be state
@@ -83,6 +86,10 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 		log.Error(fmt.Sprintf("failed to get temp collection, err: %+v", err))
 		return err
 	}
+	var tempCollSchema *schemapb.CollectionSchema
+	if err := json.Unmarshal(t.TempCollSchema, tempCollSchema); err != nil {
+		return err
+	}
 
 	undoTask := newBaseUndoTask(t.core.stepExecutor)
 	// 1. Clean meta cache of all aliases of the original collection
@@ -111,9 +118,20 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 			collID:   tempCollMeta.CollectionID,
 		},
 	)
-	// 3. Load the temporary collection
 	undoTask.AddStep(
-		&loadCollectionStep{},
+		&nullStep{},
+		&releaseCollectionStep{
+			baseStep:     baseStep{core: t.core},
+			collectionID: tempCollMeta.CollectionID,
+		})
+	// 3. Load the temporary collection if necessary
+	undoTask.AddStep(
+		&loadTempCollectionStep{
+			baseStep:       baseStep{core: t.core},
+			orgColl:        collMeta,
+			tempColl:       tempCollMeta,
+			tempCollSchema: tempCollSchema,
+		},
 		&nullStep{},
 	)
 	// 4. Exchange original collection with the temporary one
@@ -122,7 +140,8 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 		&nullStep{},
 	)
 	// At this point , the original collection has been marked as DROP,
-	// then eventually it will be removed by the async. background GC
+	// then eventually its meta and actual data will be released
+	// and removed by the async. background GC
 
 	return undoTask.Execute(ctx)
 }

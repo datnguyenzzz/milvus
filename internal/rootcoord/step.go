@@ -24,10 +24,12 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/distributed/streaming"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/pkg/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
@@ -651,8 +653,77 @@ func (s *buildIndexForTempCollectionStep) Weight() stepPriority {
 	return stepPriorityLow
 }
 
-// TODO dat.ngthanh implement me sensei !!
-type loadCollectionStep struct{}
+type loadTempCollectionStep struct {
+	baseStep
+	orgColl        *model.Collection
+	tempColl       *model.Collection
+	tempCollSchema *schemapb.CollectionSchema
+}
+
+func (s *loadTempCollectionStep) Execute(ctx context.Context) ([]nestedStep, error) {
+	// get current states of the original collection
+	orgCollState, err := s.core.queryCoord.ShowCollections(ctx, &querypb.ShowCollectionsRequest{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_ShowCollections,
+		},
+		DbID:          s.orgColl.DBID,
+		CollectionIDs: []int64{s.orgColl.CollectionID},
+	})
+	if err := merr.CheckRPCCall(orgCollState.GetStatus(), err); err != nil {
+		return nil, err
+	}
+
+	if len(orgCollState.GetCollectionIDs()) == 0 {
+		return nil, fmt.Errorf("original collection: %v can not be found in the querycoord", s.orgColl.CollectionID)
+	}
+
+	// skip if the original has not been loaded yet
+	loadedPercentage := orgCollState.GetInMemoryPercentages()[0]
+	if loadedPercentage <= 0 {
+		return nil, nil
+	}
+
+	// Load the same fields with the original collection
+	toBeLoadedFields := orgCollState.GetLoadFields()[0].GetData()
+
+	// Load the same indexes with the original collection
+	orgIndexState, err := s.core.dataCoord.ListIndexes(ctx, &indexpb.ListIndexesRequest{
+		CollectionID: s.orgColl.CollectionID,
+	})
+	if err := merr.CheckRPCCall(orgIndexState.GetStatus(), err); err != nil {
+		return nil, err
+	}
+	// assuming there is no duplicated indexes in the original collection
+	fieldIndexIDs := make(map[int64]int64)
+	for _, index := range orgIndexState.GetIndexInfos() {
+		fieldIndexIDs[index.FieldID] = index.IndexID
+	}
+
+	status, err := s.core.queryCoord.LoadCollection(ctx, &querypb.LoadCollectionRequest{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_LoadCollection,
+		},
+		DbID:         s.tempColl.DBID,
+		CollectionID: s.tempColl.CollectionID,
+		Schema:       s.tempCollSchema,
+		FieldIndexID: fieldIndexIDs,
+		LoadFields:   toBeLoadedFields,
+	})
+
+	if err := merr.CheckRPCCall(status, err); err != nil {
+		return nil, err
+	}
+
+	return nil, nil
+}
+
+func (s *loadTempCollectionStep) Desc() string {
+	return fmt.Sprintf("load temp collection: %d", s.tempColl.CollectionID)
+}
+
+func (s *loadTempCollectionStep) Weight() stepPriority {
+	return stepPriorityLow
+}
 
 // TODO dat.ngthanh implement me sensei !!
 type exchangeCollectionStep struct{}
