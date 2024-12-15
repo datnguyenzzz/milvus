@@ -75,6 +75,7 @@ type IMetaTable interface {
 	AlterCollection(ctx context.Context, oldColl *model.Collection, newColl *model.Collection, ts Timestamp) error
 	RenameCollection(ctx context.Context, dbName string, oldName string, newDBName string, newName string, ts Timestamp) error
 	GetGeneralCount(ctx context.Context) int
+	ExchangeCollection(ctx context.Context, targetCollID UniqueID, exchangeCollID UniqueID, ts Timestamp) error
 
 	// TODO: it'll be a big cost if we handle the time travel logic, since we should always list all aliases in catalog.
 	IsAlias(ctx context.Context, db, name string) bool
@@ -1246,6 +1247,12 @@ func (mt *MetaTable) GetGeneralCount(ctx context.Context) int {
 	defer mt.ddLock.RUnlock()
 
 	return mt.generalCnt
+}
+
+// ExchangeCollection exchange the meta of "targetCollID" collection with "exchangeCollID" collection
+func (mt *MetaTable) ExchangeCollection(ctx context.Context, targetCollID UniqueID, exchangeCollID UniqueID, ts Timestamp) error {
+	// todo implement me sensei !
+	return nil
 }
 
 // AddCredential add credential

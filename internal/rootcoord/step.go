@@ -18,6 +18,7 @@ package rootcoord
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 type stepPriority int
@@ -670,6 +672,9 @@ func (s *loadTempCollectionStep) Execute(ctx context.Context) ([]nestedStep, err
 		CollectionIDs: []int64{s.orgColl.CollectionID},
 	})
 	if err := merr.CheckRPCCall(orgCollState.GetStatus(), err); err != nil {
+		if errors.Is(err, merr.WrapErrCollectionNotLoaded(s.orgColl.CollectionID)) {
+			return nil, nil
+		}
 		return nil, err
 	}
 
@@ -725,5 +730,21 @@ func (s *loadTempCollectionStep) Weight() stepPriority {
 	return stepPriorityLow
 }
 
-// TODO dat.ngthanh implement me sensei !!
-type exchangeCollectionStep struct{}
+type exchangeCollectionStep struct {
+	baseStep
+	targetCollID   UniqueID
+	exchangeCollID UniqueID
+}
+
+func (s *exchangeCollectionStep) Execute(ctx context.Context) ([]nestedStep, error) {
+	err := s.core.meta.ExchangeCollection(ctx, s.targetCollID, s.exchangeCollID, typeutil.MaxTimestamp)
+	return nil, err
+}
+
+func (s *exchangeCollectionStep) Desc() string {
+	return fmt.Sprintf("exchange collection: %d by collection: %d", s.targetCollID, s.exchangeCollID)
+}
+
+func (s *exchangeCollectionStep) Weight() stepPriority {
+	return stepPriorityLow
+}
