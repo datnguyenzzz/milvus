@@ -73,6 +73,7 @@ const (
 	HasCollectionTaskName         = "HasCollectionTask"
 	DescribeCollectionTaskName    = "DescribeCollectionTask"
 	ShowCollectionTaskName        = "ShowCollectionTask"
+	TruncateCollectionTaskName    = "TruncateCollectionTask"
 	CreatePartitionTaskName       = "CreatePartitionTask"
 	DropPartitionTaskName         = "DropPartitionTask"
 	HasPartitionTaskName          = "HasPartitionTask"
@@ -1723,6 +1724,80 @@ func (t *releaseCollectionTask) Execute(ctx context.Context) (err error) {
 }
 
 func (t *releaseCollectionTask) PostExecute(ctx context.Context) error {
+	return nil
+}
+
+type truncateCollectionTask struct {
+	baseTask
+	Condition
+	*milvuspb.TruncateCollectionRequest
+
+	ctx             context.Context
+	rootCoordClient types.RootCoordClient
+	result          *commonpb.Status
+
+	collectionID       UniqueID
+	replicateMsgStream msgstream.MsgStream
+
+	chMgr    channelsMgr
+	chTicker channelsTimeTicker
+}
+
+func (t *truncateCollectionTask) TraceCtx() context.Context {
+	return t.ctx
+}
+
+func (t *truncateCollectionTask) ID() UniqueID {
+	return t.Base.MsgID
+}
+
+func (t *truncateCollectionTask) SetID(uid UniqueID) {
+	t.Base.MsgID = uid
+}
+
+func (t *truncateCollectionTask) Name() string {
+	return TruncateCollectionTaskName
+}
+
+func (t *truncateCollectionTask) Type() commonpb.MsgType {
+	return t.Base.MsgType
+}
+
+func (t *truncateCollectionTask) BeginTs() Timestamp {
+	return t.Base.Timestamp
+}
+
+func (t *truncateCollectionTask) EndTs() Timestamp {
+	return t.Base.Timestamp
+}
+
+func (t *truncateCollectionTask) SetTs(ts Timestamp) {
+	t.Base.Timestamp = ts
+}
+
+func (t *truncateCollectionTask) OnEnqueue() error {
+	if t.Base == nil {
+		t.Base = commonpbutil.NewMsgBase()
+	}
+	t.Base.MsgType = commonpb.MsgType_TruncateCollection
+	t.Base.SourceID = paramtable.GetNodeID()
+	return nil
+}
+
+func (t *truncateCollectionTask) PreExecute(ctx context.Context) error {
+	if err := validateCollectionName(t.CollectionName); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (t *truncateCollectionTask) Execute(ctx context.Context) error {
+	var err error
+	t.result, err = t.rootCoordClient.TruncateCollection(ctx, t.TruncateCollectionRequest)
+	return merr.CheckRPCCall(t.result, err)
+}
+
+func (t *truncateCollectionTask) PostExecute(ctx context.Context) error {
 	return nil
 }
 

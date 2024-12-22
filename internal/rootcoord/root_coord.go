@@ -34,6 +34,7 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -552,9 +553,13 @@ func (c *Core) Init() error {
 func (c *Core) initCredentials() error {
 	credInfo, _ := c.meta.GetCredential(c.ctx, util.UserRoot)
 	if credInfo == nil {
-		log.Debug("RootCoord init user root")
-		encryptedRootPassword, _ := crypto.PasswordEncrypt(Params.CommonCfg.DefaultRootPassword.GetValue())
-		err := c.meta.AddCredential(c.ctx, &internalpb.CredentialInfo{Username: util.UserRoot, EncryptedPassword: encryptedRootPassword})
+		encryptedRootPassword, err := crypto.PasswordEncrypt(Params.CommonCfg.DefaultRootPassword.GetValue())
+		if err != nil {
+			log.Warn("RootCoord init user root failed", zap.Error(err))
+			return err
+		}
+		log.Info("RootCoord init user root")
+		err = c.meta.AddCredential(c.ctx, &internalpb.CredentialInfo{Username: util.UserRoot, EncryptedPassword: encryptedRootPassword})
 		return err
 	}
 	return nil
@@ -1175,6 +1180,210 @@ func (c *Core) HasCollection(ctx context.Context, in *milvuspb.HasCollectionRequ
 	metrics.RootCoordDDLReqLatencyInQueue.WithLabelValues("HasCollection").Observe(float64(t.queueDur.Milliseconds()))
 
 	return t.Rsp, nil
+}
+
+func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateCollectionRequest) (*commonpb.Status, error) {
+	if err := merr.CheckHealthy(c.GetStateCode()); err != nil {
+		return merr.Status(err), err
+	}
+
+	method := "TruncateCollection"
+
+	metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.TotalLabel).Inc()
+	tr := timerecord.NewTimeRecorder(method)
+
+	log.Ctx(ctx).With(
+		zap.String("role", typeutil.RootCoordRole),
+		zap.String("dbName", in.GetDbName()),
+		zap.String("name", in.GetCollectionName()),
+	)
+
+	log.Debug("received request to truncate collection")
+
+	/**
+	* Submit a task for creating a temporary collection,
+	* with the same "Schema" with the original collection
+	 */
+	createTempCollReq, err := c.prepareCreateTempCollectionRequest(ctx, in)
+	if err != nil {
+		log.Warn("failed to prepare a request for creating a temp collection")
+		return merr.Status(err), err
+	}
+
+	cct := &createCollectionTask{
+		baseTask: newBaseTask(ctx, c),
+		Req:      createTempCollReq,
+	}
+
+	if err := c.scheduler.AddTask(cct); err != nil {
+		log.Warn("failed to enqueue request to create a temp collection, before truncating an original collection")
+		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+		return merr.Status(err), err
+	}
+
+	// There is no temp collection has been created, if the creation job fail.
+	// Thus don't need to worry about the recovery step here
+	if err := cct.WaitToFinish(); err != nil {
+		log.Warn("failed to execute request to create a temp collection, before truncating an original collection")
+		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+		return merr.Status(err), err
+	}
+
+	// Submit tasks to copy aliases of original collection
+	if aliases, err := c.meta.ListAliases(ctx, in.GetDbName(), in.GetCollectionName(), 0); err == nil {
+		for _, alias := range aliases {
+			cat := &createAliasTask{
+				baseTask: newBaseTask(ctx, c),
+				Req: &milvuspb.CreateAliasRequest{
+					DbName:         in.GetDbName(),
+					CollectionName: in.GetCollectionName(),
+					Alias:          alias,
+				},
+			}
+
+			if err := c.scheduler.AddTask(cat); err != nil {
+				log.Warn("failed to enqueue request to create alias, before truncating an original collection")
+				metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+				return merr.Status(err), err
+			}
+
+			// revert the created temp collection
+			if err := cat.WaitToFinish(); err != nil {
+				log.Error(fmt.Sprintf("failed to execute the task of %s method", method))
+				metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+
+				_ = c.dropTempCollection(ctx, createTempCollReq.GetDbName(), createTempCollReq.GetCollectionName())
+
+				return merr.Status(err), err
+			}
+		}
+	}
+
+	// Submit a task for truncating original collection
+	tct := &truncateCollectionTask{
+		baseTask:       newBaseTask(ctx, c),
+		Req:            in,
+		TempCollSchema: createTempCollReq.GetSchema(),
+	}
+
+	if err := c.scheduler.AddTask(tct); err != nil {
+		log.Error(fmt.Sprintf("failed to enqueue the task of %s method", method))
+		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+		return merr.Status(err), err
+	}
+
+	if err := tct.WaitToFinish(); err != nil {
+		log.Error(fmt.Sprintf("failed to execute the task of %s method", method))
+		metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+
+		/**
+		* 3. If the truncate collection task failed to execute
+		* To maintain the atomicity, need to drop the temp collection that has been created
+		* at the beginning of the function
+		 */
+		_ = c.dropTempCollection(ctx, createTempCollReq.GetDbName(), createTempCollReq.GetCollectionName())
+
+		return merr.Status(err), err
+	}
+
+	metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.SuccessLabel).Inc()
+	metrics.RootCoordDDLReqLatency.WithLabelValues(method).Observe(float64(tr.ElapseSpan().Milliseconds()))
+	metrics.RootCoordDDLReqLatencyInQueue.WithLabelValues(method).Observe(float64(tct.queueDur.Milliseconds()))
+
+	log.Debug("success in truncating collection")
+
+	return merr.Success(), nil
+}
+
+func (c *Core) dropTempCollection(ctx context.Context, dbName string, collectionName string) error {
+	tempColl, err := c.meta.GetCollectionByName(ctx, dbName, collectionName, typeutil.MaxTimestamp)
+	if err != nil {
+		log.Warn("failed to get the temp collection when attempt to drop it")
+		return err
+	}
+	ts, err := c.tsoAllocator.GenerateTSO(1)
+	if err != nil {
+		log.Warn("failed to generate TS when attempt to drop the temp collection")
+		return err
+	}
+
+	// run the func synchronously, to wait the temp collection to be removed before returning
+	c.garbageCollector.ReDropCollection(tempColl, ts)
+
+	return nil
+}
+
+func (c *Core) prepareCreateTempCollectionRequest(ctx context.Context, in *milvuspb.TruncateCollectionRequest) (*milvuspb.CreateCollectionRequest, error) {
+	dbName := in.GetDbName()
+
+	// get latest collection verion from meta table by requesting with maxTS
+	orgColl, err := c.meta.GetCollectionByName(ctx, dbName, in.GetCollectionName(), typeutil.MaxTimestamp)
+	if err != nil {
+		return nil, err
+	}
+
+	// temp collection name
+	tempCollName := util.GenerateTempCollectionName(orgColl.Name)
+
+	// temp collection schema
+	tempCollSchemaFields := make([]*schemapb.FieldSchema, len(orgColl.Fields))
+	for idx, f := range orgColl.Fields {
+		tempCollSchemaFields[idx] = &schemapb.FieldSchema{
+			FieldID:          f.FieldID,
+			Name:             f.Name,
+			IsPrimaryKey:     f.IsPrimaryKey,
+			Description:      f.Description,
+			DataType:         f.DataType,
+			TypeParams:       f.TypeParams,
+			IndexParams:      f.IndexParams,
+			AutoID:           f.AutoID,
+			State:            f.State,
+			ElementType:      f.ElementType,
+			DefaultValue:     f.DefaultValue,
+			IsDynamic:        f.IsDynamic,
+			IsPartitionKey:   f.IsPartitionKey,
+			IsClusteringKey:  f.IsClusteringKey,
+			Nullable:         f.Nullable,
+			IsFunctionOutput: f.IsFunctionOutput,
+		}
+	}
+
+	tempCollSchemaFunctions := make([]*schemapb.FunctionSchema, len(orgColl.Functions))
+	for idx, f := range orgColl.Functions {
+		tempCollSchemaFunctions[idx] = &schemapb.FunctionSchema{
+			Name:             f.Name,
+			Id:               f.ID,
+			Description:      f.Description,
+			Type:             f.Type,
+			InputFieldNames:  f.InputFieldNames,
+			InputFieldIds:    f.InputFieldIDs,
+			OutputFieldNames: f.OutputFieldNames,
+			OutputFieldIds:   f.OutputFieldIDs,
+			Params:           f.Params,
+		}
+	}
+
+	// error won't be occurred here
+	tempCollSchema, _ := proto.Marshal(&schemapb.CollectionSchema{
+		Name:               tempCollName,
+		Description:        orgColl.Description,
+		AutoID:             orgColl.AutoID,
+		Fields:             tempCollSchemaFields,
+		EnableDynamicField: orgColl.EnableDynamicField,
+		Properties:         orgColl.Properties,
+		Functions:          tempCollSchemaFunctions,
+		DbName:             dbName,
+	})
+
+	return &milvuspb.CreateCollectionRequest{
+		DbName:           dbName,
+		CollectionName:   tempCollName,
+		Schema:           tempCollSchema,
+		ShardsNum:        orgColl.ShardsNum,
+		ConsistencyLevel: orgColl.ConsistencyLevel,
+		Properties:       orgColl.Properties,
+		NumPartitions:    int64(orgColl.GetPartitionNum(false)),
+	}, nil
 }
 
 // getCollectionIDStr get collectionID string to avoid the alias name

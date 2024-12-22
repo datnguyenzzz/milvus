@@ -49,6 +49,7 @@ service RootCoord {
      */
     rpc DescribeCollection(milvus.DescribeCollectionRequest) returns (milvus.DescribeCollectionResponse) {}
     rpc DescribeCollectionInternal(milvus.DescribeCollectionRequest) returns (milvus.DescribeCollectionResponse) {}
+    rpc TruncateCollection(milvus.TruncateCollectionRequest) returns (common.Status) {}
 
     rpc CreateAlias(milvus.CreateAliasRequest) returns (common.Status) {}
     rpc DropAlias(milvus.DropAliasRequest) returns (common.Status) {}

@@ -17,6 +17,7 @@
 package util
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/samber/lo"
@@ -74,6 +75,8 @@ const (
 	RoleConfigObjectName = "object_name"
 	RoleConfigDBName     = "db_name"
 	RoleConfigPrivilege  = "privilege"
+
+	TempCollectionSuffix = "temp"
 
 	MaxEtcdTxnNum = 128
 	GB            = 1024 * 1024 * 1024
@@ -476,4 +479,8 @@ func GetObjectType(privName string) string {
 		}
 	}
 	return ""
+}
+
+func GenerateTempCollectionName(collName string) string {
+	return fmt.Sprintf("%s.%s", collName, TempCollectionSuffix)
 }

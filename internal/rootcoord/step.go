@@ -18,18 +18,23 @@ package rootcoord
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/distributed/streaming"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
+	"github.com/milvus-io/milvus/internal/proto/indexpb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/pkg/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 type stepPriority int
@@ -597,4 +602,149 @@ func (s *simpleStep) Desc() string {
 
 func (s *simpleStep) Weight() stepPriority {
 	return s.weight
+}
+
+type buildIndexForTempCollectionStep struct {
+	baseStep
+	orgCollectionID  UniqueID
+	tempCollectionID UniqueID
+	partIDs          []UniqueID
+}
+
+func (s *buildIndexForTempCollectionStep) Execute(ctx context.Context) ([]nestedStep, error) {
+	// List indexes of the original collection
+	liResp, err := s.core.dataCoord.ListIndexes(
+		ctx, &indexpb.ListIndexesRequest{CollectionID: s.orgCollectionID},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	orgIndexInfos := liResp.GetIndexInfos()
+	// Copy original indexes for temporary collection
+	for _, index := range orgIndexInfos {
+		ts, err := s.core.tsoAllocator.GenerateTSO(1)
+		if err != nil {
+			return nil, err
+		}
+		status, err := s.core.dataCoord.CreateIndex(ctx, &indexpb.CreateIndexRequest{
+			CollectionID:    s.tempCollectionID,
+			FieldID:         index.GetFieldID(),
+			IndexName:       index.GetIndexName(),
+			TypeParams:      index.GetTypeParams(),
+			IndexParams:     index.GetIndexParams(),
+			Timestamp:       ts,
+			IsAutoIndex:     index.GetIsAutoIndex(),
+			UserIndexParams: index.GetUserIndexParams(),
+		})
+
+		if err = merr.CheckRPCCall(status, err); err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, nil
+}
+
+func (s *buildIndexForTempCollectionStep) Desc() string {
+	return fmt.Sprintf("build index for temp collection: %d, from original collection: %d", s.tempCollectionID, s.orgCollectionID)
+}
+
+func (s *buildIndexForTempCollectionStep) Weight() stepPriority {
+	return stepPriorityLow
+}
+
+type loadTempCollectionStep struct {
+	baseStep
+	orgColl        *model.Collection
+	tempColl       *model.Collection
+	tempCollSchema *schemapb.CollectionSchema
+}
+
+func (s *loadTempCollectionStep) Execute(ctx context.Context) ([]nestedStep, error) {
+	// get current states of the original collection
+	orgCollState, err := s.core.queryCoord.ShowCollections(ctx, &querypb.ShowCollectionsRequest{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_ShowCollections,
+		},
+		DbID:          s.orgColl.DBID,
+		CollectionIDs: []int64{s.orgColl.CollectionID},
+	})
+	if err := merr.CheckRPCCall(orgCollState.GetStatus(), err); err != nil {
+		if errors.Is(err, merr.WrapErrCollectionNotLoaded(s.orgColl.CollectionID)) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if len(orgCollState.GetCollectionIDs()) == 0 {
+		return nil, fmt.Errorf("original collection: %v can not be found in the querycoord", s.orgColl.CollectionID)
+	}
+
+	// skip if the original has not been loaded yet
+	loadedPercentage := orgCollState.GetInMemoryPercentages()[0]
+	if loadedPercentage <= 0 {
+		return nil, nil
+	}
+
+	// Load the same fields with the original collection
+	toBeLoadedFields := orgCollState.GetLoadFields()[0].GetData()
+
+	// Load the same indexes with the original collection
+	orgIndexState, err := s.core.dataCoord.ListIndexes(ctx, &indexpb.ListIndexesRequest{
+		CollectionID: s.orgColl.CollectionID,
+	})
+	if err := merr.CheckRPCCall(orgIndexState.GetStatus(), err); err != nil {
+		return nil, err
+	}
+	// assuming there is no duplicated indexes in the original collection
+	fieldIndexIDs := make(map[int64]int64)
+	for _, index := range orgIndexState.GetIndexInfos() {
+		fieldIndexIDs[index.FieldID] = index.IndexID
+	}
+
+	status, err := s.core.queryCoord.LoadCollection(ctx, &querypb.LoadCollectionRequest{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_LoadCollection,
+		},
+		DbID:         s.tempColl.DBID,
+		CollectionID: s.tempColl.CollectionID,
+		Schema:       s.tempCollSchema,
+		FieldIndexID: fieldIndexIDs,
+		LoadFields:   toBeLoadedFields,
+	})
+
+	if err := merr.CheckRPCCall(status, err); err != nil {
+		return nil, err
+	}
+
+	return nil, nil
+}
+
+func (s *loadTempCollectionStep) Desc() string {
+	return fmt.Sprintf("load temp collection: %d", s.tempColl.CollectionID)
+}
+
+func (s *loadTempCollectionStep) Weight() stepPriority {
+	return stepPriorityLow
+}
+
+type exchangeCollectionStep struct {
+	baseStep
+	targetCollID   UniqueID
+	exchangeCollID UniqueID
+	dbName         string
+}
+
+func (s *exchangeCollectionStep) Execute(ctx context.Context) ([]nestedStep, error) {
+	err := s.core.meta.ExchangeCollection(ctx, s.dbName, s.targetCollID, s.exchangeCollID)
+	return nil, err
+}
+
+func (s *exchangeCollectionStep) Desc() string {
+	return fmt.Sprintf("exchange collection: %d by collection: %d", s.targetCollID, s.exchangeCollID)
+}
+
+func (s *exchangeCollectionStep) Weight() stepPriority {
+	return stepPriorityLow
 }

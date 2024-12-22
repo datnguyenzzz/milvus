@@ -53,6 +53,7 @@ const (
 	SearchAction         = "search"
 	AdvancedSearchAction = "advanced_search"
 	HybridSearchAction   = "hybrid_search"
+	TruncateAction       = "truncate"
 
 	UpdatePasswordAction            = "update_password"
 	GrantRoleAction                 = "grant_role"
@@ -74,6 +75,7 @@ const (
 	VectorCollectionsCreatePath   = "/vector/collections/create"
 	VectorCollectionsDescribePath = "/vector/collections/describe"
 	VectorCollectionsDropPath     = "/vector/collections/drop"
+	VectorCollectionTruncatePath  = "/vector/collections/truncate"
 	VectorInsertPath              = "/vector/insert"
 	VectorUpsertPath              = "/vector/upsert"
 	VectorSearchPath              = "/vector/search"

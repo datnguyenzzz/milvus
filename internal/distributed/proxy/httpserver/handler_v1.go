@@ -181,6 +181,7 @@ func (h *HandlersV1) RegisterRoutesToV1(router gin.IRouter) {
 	router.POST(VectorCollectionsCreatePath, h.createCollection)
 	router.GET(VectorCollectionsDescribePath, h.getCollectionDetails)
 	router.POST(VectorCollectionsDropPath, h.dropCollection)
+	router.POST(VectorCollectionTruncatePath, h.truncateCollection)
 	router.POST(VectorQueryPath, h.query)
 	router.POST(VectorGetPath, h.get)
 	router.POST(VectorDeletePath, h.delete)
@@ -488,6 +489,44 @@ func (h *HandlersV1) dropCollection(c *gin.Context) {
 	}
 	if err != nil {
 		HTTPReturn(c, http.StatusOK, gin.H{HTTPReturnCode: merr.Code(err), HTTPReturnMessage: err.Error()})
+	} else {
+		HTTPReturn(c, http.StatusOK, gin.H{HTTPReturnCode: http.StatusOK, HTTPReturnData: gin.H{}})
+	}
+}
+
+func (h *HandlersV1) truncateCollection(c *gin.Context) {
+	// Validation rules
+	httpReq := TruncateCollectionReq{
+		DbName: DefaultDbName,
+	}
+	if err := c.ShouldBindWith(&httpReq, binding.JSON); err != nil {
+		log.Warn("can not bind truncate collection request", zap.Any("request", httpReq), zap.Error(err))
+		HTTPAbortReturn(c, http.StatusOK, gin.H{
+			HTTPReturnCode:    merr.Code(merr.ErrIncorrectParameterFormat),
+			HTTPReturnMessage: merr.ErrIncorrectParameterFormat.Error() + ", error: " + err.Error(),
+		})
+		return
+	}
+	if httpReq.CollectionName == "" {
+		log.Warn("truncate collection request miss: [collectionName]")
+		HTTPAbortReturn(c, http.StatusOK, gin.H{
+			HTTPReturnCode:    merr.Code(merr.ErrMissingRequiredParameters),
+			HTTPReturnMessage: merr.ErrMissingRequiredParameters.Error() + ", required parameters: [collectionName]",
+		})
+		return
+	}
+
+	// Pass request to Proxy
+	dto := &milvuspb.TruncateCollectionRequest{
+		DbName:         httpReq.DbName,
+		CollectionName: httpReq.CollectionName,
+	}
+	c.Set(ContextRequest, dto)
+	username, _ := c.Get(ContextUsername)
+	ctx := proxy.NewContextWithMetadata(c, username.(string), dto.DbName)
+
+	if _, err := h.proxy.TruncateCollection(ctx, dto); err != nil {
+		HTTPReturn(c, http.StatusInternalServerError, gin.H{HTTPReturnCode: merr.Code(err), HTTPReturnMessage: err.Error()})
 	} else {
 		HTTPReturn(c, http.StatusOK, gin.H{HTTPReturnCode: http.StatusOK, HTTPReturnData: gin.H{}})
 	}
