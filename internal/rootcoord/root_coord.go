@@ -1201,7 +1201,7 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 	log.Debug("received request to truncate collection")
 
 	/**
-	* 1. Submit a task for creating a temporary collection,
+	* Submit a task for creating a temporary collection,
 	* with the same "Schema" with the original collection
 	 */
 	createTempCollReq, err := c.prepareCreateTempCollectionRequest(ctx, in)
@@ -1229,7 +1229,37 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 		return merr.Status(err), err
 	}
 
-	// 2. Submit a task for truncating original collection
+	// Submit tasks to copy aliases of original collection
+	if aliases, err := c.meta.ListAliases(ctx, in.GetDbName(), in.GetCollectionName(), 0); err == nil {
+		for _, alias := range aliases {
+			cat := &createAliasTask{
+				baseTask: newBaseTask(ctx, c),
+				Req: &milvuspb.CreateAliasRequest{
+					DbName:         in.GetDbName(),
+					CollectionName: in.GetCollectionName(),
+					Alias:          alias,
+				},
+			}
+
+			if err := c.scheduler.AddTask(cat); err != nil {
+				log.Warn("failed to enqueue request to create alias, before truncating an original collection")
+				metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+				return merr.Status(err), err
+			}
+
+			// revert the created temp collection
+			if err := cat.WaitToFinish(); err != nil {
+				log.Error(fmt.Sprintf("failed to execute the task of %s method", method))
+				metrics.RootCoordDDLReqCounter.WithLabelValues(method, metrics.FailLabel).Inc()
+
+				_ = c.dropTempCollection(ctx, createTempCollReq.GetDbName(), createTempCollReq.GetCollectionName())
+
+				return merr.Status(err), err
+			}
+		}
+	}
+
+	// Submit a task for truncating original collection
 	tct := &truncateCollectionTask{
 		baseTask:       newBaseTask(ctx, c),
 		Req:            in,
@@ -1251,19 +1281,7 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 		* To maintain the atomicity, need to drop the temp collection that has been created
 		* at the beginning of the function
 		 */
-		tempColl, uerr := c.meta.GetCollectionByName(ctx, createTempCollReq.GetDbName(), createTempCollReq.GetCollectionName(), typeutil.MaxTimestamp)
-		if uerr != nil {
-			log.Warn("failed to get the temp collection when attempt to drop it")
-			return merr.Status(uerr), uerr
-		}
-		ts, uerr := c.tsoAllocator.GenerateTSO(1)
-		if uerr != nil {
-			log.Warn("failed to generate TS when attempt to drop the temp collection")
-			return merr.Status(uerr), uerr
-		}
-
-		// run the func synchronously, to wait the temp collection to be removed before returning
-		c.garbageCollector.ReDropCollection(tempColl, ts)
+		_ = c.dropTempCollection(ctx, createTempCollReq.GetDbName(), createTempCollReq.GetCollectionName())
 
 		return merr.Status(err), err
 	}
@@ -1275,6 +1293,24 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 	log.Debug("success in truncating collection")
 
 	return merr.Success(), nil
+}
+
+func (c *Core) dropTempCollection(ctx context.Context, dbName string, collectionName string) error {
+	tempColl, err := c.meta.GetCollectionByName(ctx, dbName, collectionName, typeutil.MaxTimestamp)
+	if err != nil {
+		log.Warn("failed to get the temp collection when attempt to drop it")
+		return err
+	}
+	ts, err := c.tsoAllocator.GenerateTSO(1)
+	if err != nil {
+		log.Warn("failed to generate TS when attempt to drop the temp collection")
+		return err
+	}
+
+	// run the func synchronously, to wait the temp collection to be removed before returning
+	c.garbageCollector.ReDropCollection(tempColl, ts)
+
+	return nil
 }
 
 func (c *Core) prepareCreateTempCollectionRequest(ctx context.Context, in *milvuspb.TruncateCollectionRequest) (*milvuspb.CreateCollectionRequest, error) {

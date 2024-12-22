@@ -37,15 +37,6 @@ type truncateCollectionTask struct {
 	TempCollSchema []byte
 }
 
-// To be state
-/**
-undo.AddStep(CreateTempCollection, RemoveTempCollection) // 1
-undo.AddStep(CreateIndexesForCollection, nullstep) // 2
-undo.AddStep(LoadTempCollection, nullstep) // 3
-undo.AddStep(ExchangeCollections, nullstep) // 4
-redo.AddStep(RemoveOriginalCollection) // 5
-*/
-
 func (t *truncateCollectionTask) validate(ctx context.Context) error {
 	if err := CheckMsgType(t.Req.GetBase().GetMsgType(), commonpb.MsgType_TruncateCollection); err != nil {
 		return err
@@ -106,7 +97,7 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 		},
 		&nullStep{},
 	)
-	// 2. build index for the temp collection, which are cloned from the original ones
+	// build index for the temp collection, which are cloned from the original ones
 	undoTask.AddStep(
 		&buildIndexForTempCollectionStep{
 			baseStep:         baseStep{core: t.core},
@@ -124,7 +115,7 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 			baseStep:     baseStep{core: t.core},
 			collectionID: tempCollMeta.CollectionID,
 		})
-	// 3. Load the temporary collection if necessary
+	// Load the temporary collection if necessary
 	undoTask.AddStep(
 		&loadTempCollectionStep{
 			baseStep:       baseStep{core: t.core},
@@ -134,11 +125,17 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 		},
 		&nullStep{},
 	)
-	// 4. Exchange original collection with the temporary one
+	// Exchange original collection with the temporary one
 	undoTask.AddStep(
-		&exchangeCollectionStep{},
+		&exchangeCollectionStep{
+			baseStep:       baseStep{core: t.core},
+			dbName:         dbName,
+			targetCollID:   tempCollMeta.CollectionID,
+			exchangeCollID: collMeta.CollectionID,
+		},
 		&nullStep{},
 	)
+	// TODO Drop original collection
 	// At this point , the original collection has been marked as DROP,
 	// then eventually its meta and actual data will be released
 	// and removed by the async. background GC

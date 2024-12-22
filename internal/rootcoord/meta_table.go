@@ -75,7 +75,7 @@ type IMetaTable interface {
 	AlterCollection(ctx context.Context, oldColl *model.Collection, newColl *model.Collection, ts Timestamp) error
 	RenameCollection(ctx context.Context, dbName string, oldName string, newDBName string, newName string, ts Timestamp) error
 	GetGeneralCount(ctx context.Context) int
-	ExchangeCollection(ctx context.Context, targetCollID UniqueID, exchangeCollID UniqueID, ts Timestamp) error
+	ExchangeCollection(ctx context.Context, dbName string, targetCollID UniqueID, exchangeCollID UniqueID) error
 
 	// TODO: it'll be a big cost if we handle the time travel logic, since we should always list all aliases in catalog.
 	IsAlias(ctx context.Context, db, name string) bool
@@ -1250,8 +1250,34 @@ func (mt *MetaTable) GetGeneralCount(ctx context.Context) int {
 }
 
 // ExchangeCollection exchange the meta of "targetCollID" collection with "exchangeCollID" collection
-func (mt *MetaTable) ExchangeCollection(ctx context.Context, targetCollID UniqueID, exchangeCollID UniqueID, ts Timestamp) error {
-	// todo implement me sensei !
+func (mt *MetaTable) ExchangeCollection(ctx context.Context, dbName string, targetCollID UniqueID, exchangeCollID UniqueID) error {
+	// lock the read until the write process is finished
+	mt.ddLock.RLock()
+	defer mt.ddLock.RUnlock()
+
+	if len(dbName) == 0 {
+		log.Warn("DBName is empty")
+		dbName = util.DefaultDBName
+	}
+
+	if !mt.names.exist(dbName) {
+		return merr.WrapErrDatabaseNotFound(dbName)
+	}
+
+	// Safety check to ensure the collections are created in the meta table for the process
+	targetColl, exist := mt.collID2Meta[targetCollID]
+	if !exist || targetColl.State != pb.CollectionState_CollectionCreated {
+		return merr.WrapErrCollectionNotFound(targetCollID)
+	}
+
+	exchangeColl, exist := mt.collID2Meta[exchangeCollID]
+	if !exist || exchangeColl.State != pb.CollectionState_CollectionCreated {
+		return merr.WrapErrCollectionNotFound(exchangeCollID)
+	}
+
+	// Exchange to meta of 2 collections
+	// TODO add me
+
 	return nil
 }
 
