@@ -24,6 +24,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util"
@@ -135,7 +136,23 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 		},
 		&nullStep{},
 	)
-	// TODO Drop original collection
+	// drop the original collection
+	undoTask.AddStep(
+		&changeCollectionStateStep{
+			baseStep:     baseStep{core: t.core},
+			collectionID: collMeta.CollectionID,
+			state:        pb.CollectionState_CollectionDropping,
+			ts:           ts,
+		},
+		&nullStep{},
+	)
+	undoTask.AddStep(
+		&releaseCollectionStep{
+			baseStep:     baseStep{core: t.core},
+			collectionID: collMeta.CollectionID,
+		},
+		&nullStep{},
+	)
 	// At this point , the original collection has been marked as DROP,
 	// then eventually its meta and actual data will be released
 	// and removed by the async. background GC
