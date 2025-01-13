@@ -1277,8 +1277,8 @@ func (mt *MetaTable) ExchangeCollection(ctx context.Context, dbName string, targ
 
 	// Assume 2 given collections have a same set of aliases, so we will skip exchanging the aliases
 	mt.names.insert(dbName, targetColl.Name, exchangeCollID)
-	mt.names.insert(dbName, exchangeColl.Name, targetCollID)
 	mt.collID2Meta[targetCollID] = exchangeColl
+	mt.names.insert(dbName, exchangeColl.Name, targetCollID)
 	mt.collID2Meta[exchangeCollID] = targetColl
 
 	// TODO dat.ngthanh exchange the collection within the metastore ETCD

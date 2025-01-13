@@ -126,7 +126,9 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 		},
 		&nullStep{},
 	)
-	// Exchange original collection with the temporary one
+	// Exchange original collection with the temporary one.
+	//   Original Collection ID <--> Temporary Collection
+	//   Temporary Collection ID <--> Original Collection
 	undoTask.AddStep(
 		&exchangeCollectionStep{
 			baseStep:       baseStep{core: t.core},
@@ -136,11 +138,11 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 		},
 		&nullStep{},
 	)
-	// drop the original collection
+	// drop the temporary collection
 	undoTask.AddStep(
 		&changeCollectionStateStep{
 			baseStep:     baseStep{core: t.core},
-			collectionID: collMeta.CollectionID,
+			collectionID: tempCollMeta.CollectionID,
 			state:        pb.CollectionState_CollectionDropping,
 			ts:           ts,
 		},
@@ -149,7 +151,7 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 	undoTask.AddStep(
 		&releaseCollectionStep{
 			baseStep:     baseStep{core: t.core},
-			collectionID: collMeta.CollectionID,
+			collectionID: tempCollMeta.CollectionID,
 		},
 		&nullStep{},
 	)
