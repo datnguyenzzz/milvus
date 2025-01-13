@@ -155,7 +155,7 @@ func (t *truncateCollectionTask) Execute(ctx context.Context) error {
 		},
 		&nullStep{},
 	)
-	// At this point , the original collection has been marked as DROP,
+	// At this point , the temp collection has been marked as DROP,
 	// then eventually its meta and actual data will be released
 	// and removed by the async. background GC
 

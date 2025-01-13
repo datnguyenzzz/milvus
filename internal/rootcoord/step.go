@@ -35,6 +35,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 type stepPriority int
@@ -737,7 +738,7 @@ type exchangeCollectionStep struct {
 }
 
 func (s *exchangeCollectionStep) Execute(ctx context.Context) ([]nestedStep, error) {
-	err := s.core.meta.ExchangeCollection(ctx, s.dbName, s.targetCollID, s.exchangeCollID)
+	err := s.core.meta.ExchangeCollection(ctx, s.dbName, s.targetCollID, s.exchangeCollID, typeutil.MaxTimestamp)
 	return nil, err
 }
 

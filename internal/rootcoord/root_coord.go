@@ -1292,6 +1292,8 @@ func (c *Core) TruncateCollection(ctx context.Context, in *milvuspb.TruncateColl
 
 	log.Debug("success in truncating collection")
 
+	// TODO dat.ngthanh Implement mechanism to prevent writing to the truncating collection
+
 	return merr.Success(), nil
 }
 

@@ -75,7 +75,7 @@ type IMetaTable interface {
 	AlterCollection(ctx context.Context, oldColl *model.Collection, newColl *model.Collection, ts Timestamp) error
 	RenameCollection(ctx context.Context, dbName string, oldName string, newDBName string, newName string, ts Timestamp) error
 	GetGeneralCount(ctx context.Context) int
-	ExchangeCollection(ctx context.Context, dbName string, targetCollID UniqueID, exchangeCollID UniqueID) error
+	ExchangeCollection(ctx context.Context, dbName string, targetCollID UniqueID, exchangeCollID UniqueID, ts typeutil.Timestamp) error
 
 	// TODO: it'll be a big cost if we handle the time travel logic, since we should always list all aliases in catalog.
 	IsAlias(ctx context.Context, db, name string) bool
@@ -1250,7 +1250,7 @@ func (mt *MetaTable) GetGeneralCount(ctx context.Context) int {
 }
 
 // ExchangeCollection exchange the meta of "targetCollID" collection with "exchangeCollID" collection
-func (mt *MetaTable) ExchangeCollection(ctx context.Context, dbName string, targetCollID UniqueID, exchangeCollID UniqueID) error {
+func (mt *MetaTable) ExchangeCollection(ctx context.Context, dbName string, targetCollID UniqueID, exchangeCollID UniqueID, ts typeutil.Timestamp) error {
 	// lock the read until the write process is finished
 	mt.ddLock.RLock()
 	defer mt.ddLock.RUnlock()
@@ -1281,7 +1281,15 @@ func (mt *MetaTable) ExchangeCollection(ctx context.Context, dbName string, targ
 	mt.names.insert(dbName, exchangeColl.Name, targetCollID)
 	mt.collID2Meta[exchangeCollID] = targetColl
 
-	// TODO dat.ngthanh exchange the collection within the metastore ETCD
+	// Exchange the collection within the metastore ETCD
+	temp := targetColl.Clone()
+	if err := mt.catalog.AlterCollection(ctx, targetColl, exchangeColl, metastore.MODIFY, ts); err != nil {
+		return err
+	}
+
+	if err := mt.catalog.AlterCollection(ctx, exchangeColl, temp, metastore.MODIFY, ts); err != nil {
+		return err
+	}
 
 	return nil
 }
